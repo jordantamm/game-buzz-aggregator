@@ -1,0 +1,11 @@
+go 1.23
+
+use (
+	./gen/go
+	./pkg
+	./services/api-gateway
+	./services/mcp-server
+	./services/reddit-connector
+	./services/sink-consumer
+	./tests/integration
+)

@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS game_buzz_hourly;
+DROP TABLE IF EXISTS mention_embeddings;
+DROP TABLE IF EXISTS mention_games;
+DROP TABLE IF EXISTS mentions;
+DROP TABLE IF EXISTS game_aliases;
+DROP TABLE IF EXISTS games;
+DROP EXTENSION IF EXISTS pg_trgm;
+DROP EXTENSION IF EXISTS timescaledb;
+DROP EXTENSION IF EXISTS vector;

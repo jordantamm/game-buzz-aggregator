@@ -1,0 +1,46 @@
+syntax = "proto3";
+package gba.v1;
+
+import "google/protobuf/timestamp.proto";
+import "gba/v1/common.proto";
+
+option go_package = "github.com/jordantamm/game-buzz-aggregator/gen/go/gba/v1;gbav1";
+
+// Mention is the canonical raw event emitted by every connector.
+// It is intentionally source-agnostic: a new source means a new connector,
+// no schema change.
+message Mention {
+  // ULID derived deterministically from sha256(source || native_id).
+  // Same input always produces the same id, giving us idempotency end-to-end.
+  string mention_id = 1;
+
+  Source source = 2;
+
+  // The source's native identifier (e.g. Reddit fullname "t3_abc123").
+  string native_id = 3;
+
+  // sha256 of the author handle. We never carry the raw author through the pipeline.
+  string author_hash = 4;
+
+  string text = 5;
+
+  google.protobuf.Timestamp created_at = 6;
+
+  Engagement engagement = 7;
+
+  // Key into the raw-payload object store (e.g. "reddit/2026/05/20/abc123.json").
+  // The full raw response is NOT inlined in the message.
+  string raw_payload_ref = 8;
+
+  // For threaded sources (Reddit comments, etc).
+  string parent_id = 9;
+
+  // W3C traceparent header value, set by the producer. Consumers use this as
+  // the parent span context to stitch the trace across the Kafka boundary.
+  string trace_id = 10;
+
+  // Free-form source-specific context (e.g. {"subreddit": "games"}).
+  // Avoid relying on this in downstream services — anything used downstream
+  // should be promoted to a typed field.
+  map<string, string> source_metadata = 11;
+}

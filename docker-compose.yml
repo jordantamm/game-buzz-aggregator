@@ -1,0 +1,297 @@
+# docker-compose.yml
+#
+# Brings up the full local stack:
+#   Dependencies: redpanda, postgres, redis, minio, temporal, otel-collector, jaeger, prometheus, grafana
+#   App services: reddit-connector, enricher, sink-consumer, api-gateway, mcp-server
+#
+# Service application images are built locally from ./services/*.
+# Run `make up` instead of `docker compose up` — the Makefile handles env loading.
+
+name: game-buzz-aggregator
+
+x-app-env: &app-env
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+
+services:
+
+  # ─── Streaming ──────────────────────────────────────────────────────
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr 0.0.0.0:8082
+      - --advertise-pandaproxy-addr redpanda:8082
+      - --schema-registry-addr 0.0.0.0:8081
+    ports:
+      - "9092:9092"
+      - "8081:8081"   # schema registry
+      - "8082:8082"   # pandaproxy
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redpanda-console:
+    image: redpandadata/console:v2.7.2
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    ports:
+      - "8090:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  bootstrap-topics:
+    image: redpandadata/redpanda:v24.2.7
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        for topic in mentions.raw mentions.enriched mentions.dlq; do
+          rpk topic create $$topic --brokers redpanda:9092 --partitions 6 --replicas 1 || true
+        done
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"
+
+  # ─── Storage ────────────────────────────────────────────────────────
+  postgres:
+    # Image with pgvector + TimescaleDB pre-installed
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gba}
+      POSTGRES_USER: ${POSTGRES_USER:-gba}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gba_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gba}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    volumes:
+      - ./migrations:/migrations
+    command:
+      - -path=/migrations
+      - -database=${POSTGRES_DSN:-postgres://gba:gba_dev_password@postgres:5432/gba?sslmode=disable}
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  seed-games:
+    image: postgres:16
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-gba_dev_password}
+    volumes:
+      - ./seed:/seed
+      - ./scripts/seed-games.sh:/seed-games.sh:ro
+    entrypoint: /bin/bash
+    command: /seed-games.sh
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin_dev_password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-bootstrap:
+    image: minio/mc:latest
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        until mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin_dev_password}; do
+          sleep 1
+        done
+        mc mb --ignore-existing local/${MINIO_BUCKET:-raw}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  # ─── Orchestration ──────────────────────────────────────────────────
+  temporal:
+    image: temporalio/auto-setup:1.25.1
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-gba}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-gba_dev_password}
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7233:7233"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8233:8080"
+    depends_on:
+      - temporal
+
+  # ─── Observability ──────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.107.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./docker/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # UI
+      - "14250:14250"
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+
+  # ─── App services ───────────────────────────────────────────────────
+  reddit-connector:
+    build:
+      context: .
+      dockerfile: services/reddit-connector/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: reddit-connector
+    depends_on:
+      bootstrap-topics:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-bootstrap:
+        condition: service_completed_successfully
+
+  enricher:
+    build:
+      context: .
+      dockerfile: services/enricher/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: enricher
+    depends_on:
+      bootstrap-topics:
+        condition: service_completed_successfully
+      seed-games:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_started
+
+  sink-consumer:
+    build:
+      context: .
+      dockerfile: services/sink-consumer/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: sink-consumer
+    depends_on:
+      bootstrap-topics:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: api-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: services/mcp-server/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: mcp-server
+    ports:
+      - "8082:8081"   # MCP Streamable HTTP transport
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  minio-data:
