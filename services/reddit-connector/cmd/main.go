@@ -37,7 +37,7 @@ func run() error {
 	viper.SetDefault("REDDIT_SUBREDDITS", "games,gaming,patientgamers,pcgaming,IndieGaming")
 	viper.SetDefault("REDDIT_POLL_INTERVAL_SECONDS", 30)
 	viper.SetDefault("REDDIT_POLL_MAX_INTERVAL_SECONDS", 300)
-	viper.SetDefault("REDPANDA_BROKERS", "localhost:9092")
+	viper.SetDefault("REDPANDA_BROKERS", "localhost:19092")
 	viper.SetDefault("TOPIC_MENTIONS_RAW", "mentions.raw")
 	viper.SetDefault("REDIS_ADDR", "localhost:6379")
 	viper.SetDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
@@ -74,8 +74,12 @@ func run() error {
 		return fmt.Errorf("kafka producer: %w", err)
 	}
 	defer prod.Close()
+	log.Info("kafka producer created (connection is lazy — established on first produce)",
+		zap.Strings("brokers", brokers),
+		zap.String("topic", viper.GetString("TOPIC_MENTIONS_RAW")),
+	)
 
-	pub := publisher.New(prod, viper.GetString("TOPIC_MENTIONS_RAW"))
+	pub := publisher.New(prod, viper.GetString("TOPIC_MENTIONS_RAW"), log)
 	cursor := state.New(rdb)
 	bucket := ratelimit.New(rdb)
 

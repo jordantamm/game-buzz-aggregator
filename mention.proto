@@ -4,7 +4,7 @@ package gba.v1;
 import "google/protobuf/timestamp.proto";
 import "gba/v1/common.proto";
 
-option go_package = "github.com/yourusername/game-buzz-aggregator/gen/go/gba/v1;gbav1";
+option go_package = "github.com/jordantamm/game-buzz-aggregator/gen/go/gba/v1;gbav1";
 
 // Mention is the canonical raw event emitted by every connector.
 // It is intentionally source-agnostic: a new source means a new connector,

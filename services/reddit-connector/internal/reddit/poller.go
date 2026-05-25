@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -103,12 +105,17 @@ func (p *Poller) poll(ctx context.Context) (int, error) {
 		return 0, err
 	}
 
+	p.log.Info("fetched posts from reddit", zap.Int("count", len(posts)), zap.String("after", after))
+
+	published := 0
 	for _, post := range posts {
 		if err := p.publishPost(ctx, post); err != nil {
 			p.log.Error("publish failed", zap.String("native_id", post.Name), zap.Error(err))
 			continue
 		}
+		published++
 	}
+	p.log.Info("poll complete", zap.Int("fetched", len(posts)), zap.Int("published", published))
 
 	if nextAfter != "" {
 		if err := p.cursor.Set(ctx, p.subreddit, nextAfter); err != nil {
@@ -116,7 +123,7 @@ func (p *Poller) poll(ctx context.Context) (int, error) {
 		}
 	}
 
-	return len(posts), nil
+	return published, nil
 }
 
 func (p *Poller) publishPost(ctx context.Context, post postData) error {
@@ -142,6 +149,11 @@ func (p *Poller) publishPost(ctx context.Context, post postData) error {
 	}
 
 	key := fmt.Sprintf("reddit:%s", p.subreddit)
+
+	if jsonBytes, err := protojson.Marshal(mention); err == nil {
+		p.log.Info("mention payload", zap.String("native_id", post.Name), zap.String("mention_id", mentionID), zap.String("key", key), zap.Any("mention", json.RawMessage(jsonBytes)))
+	}
+
 	return p.pub.Publish(ctx, key, mention)
 }
 
