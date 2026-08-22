@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jordantamm/game-buzz-aggregator/pkg/embed"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/pg"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/telemetry"
 	"github.com/jordantamm/game-buzz-aggregator/services/api-gateway/internal/handler"
@@ -29,6 +30,8 @@ func run() error {
 	viper.AutomaticEnv()
 	viper.SetDefault("POSTGRES_DSN", "postgres://gba:gba_dev_password@localhost:5432/gba?sslmode=disable")
 	viper.SetDefault("API_GATEWAY_PORT", "8080")
+	viper.SetDefault("EMBEDDER_URL", "http://enricher:8000")
+	viper.SetDefault("EMBEDDER_TIMEOUT_MS", 5000)
 	viper.SetDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
 
 	log, _ := zap.NewProduction()
@@ -58,7 +61,14 @@ func run() error {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	h := handler.New(pool, log)
+	// Optional: if the embedder is unreachable, /v1/search degrades to
+	// keyword-only retrieval instead of erroring.
+	embedder := embed.NewClient(
+		viper.GetString("EMBEDDER_URL"),
+		time.Duration(viper.GetInt("EMBEDDER_TIMEOUT_MS"))*time.Millisecond,
+	)
+
+	h := handler.New(pool, embedder, log)
 	h.Routes(r)
 
 	addr := ":" + viper.GetString("API_GATEWAY_PORT")

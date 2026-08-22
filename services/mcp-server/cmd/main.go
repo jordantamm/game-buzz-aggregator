@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jordantamm/game-buzz-aggregator/pkg/embed"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/pg"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/telemetry"
 	"github.com/jordantamm/game-buzz-aggregator/services/mcp-server/internal/tools"
@@ -31,6 +32,8 @@ func run() error {
 	viper.AutomaticEnv()
 	viper.SetDefault("POSTGRES_DSN", "postgres://gba:gba_dev_password@localhost:5432/gba?sslmode=disable")
 	viper.SetDefault("MCP_SERVER_HTTP_PORT", "8081")
+	viper.SetDefault("EMBEDDER_URL", "http://enricher:8000")
+	viper.SetDefault("EMBEDDER_TIMEOUT_MS", 5000)
 	viper.SetDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
 
 	log, _ := zap.NewProduction()
@@ -62,7 +65,14 @@ func run() error {
 		server.WithToolCapabilities(true),
 	)
 
-	tools.Register(mcpServer, pool)
+	// The embedder is optional: if it is unreachable, search_mentions degrades
+	// to keyword-only retrieval rather than failing outright.
+	embedder := embed.NewClient(
+		viper.GetString("EMBEDDER_URL"),
+		time.Duration(viper.GetInt("EMBEDDER_TIMEOUT_MS"))*time.Millisecond,
+	)
+
+	tools.Register(mcpServer, tools.Deps{Pool: pool, Embedder: embedder})
 
 	if *httpMode {
 		addr := ":" + viper.GetString("MCP_SERVER_HTTP_PORT")

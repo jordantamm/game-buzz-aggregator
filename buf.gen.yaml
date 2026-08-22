@@ -1,20 +1,34 @@
 version: v2
+
 managed:
   enabled: true
   override:
     - file_option: go_package_prefix
       value: github.com/jordantamm/game-buzz-aggregator/gen/go
+
+# Plugin versions are pinned deliberately. Unpinned remote plugins resolve to
+# whatever is current at generation time, and the generated Python carries a
+# hard runtime-version assertion: gencode from protoc 7.x refuses to load under
+# a protobuf 5.x runtime with a VersionError at import. Floating the plugin
+# therefore breaks the enricher the next time anyone runs `make proto`.
+#
+# Keep these in lockstep with the pinned runtimes:
+#   protocolbuffers/go     <-> google.golang.org/protobuf in pkg/go.mod (v1.35.1)
+#   protocolbuffers/python <-> protobuf in services/enricher/pyproject.toml (5.28.3)
 plugins:
-  - remote: buf.build/protocolbuffers/go
+  - remote: buf.build/protocolbuffers/go:v1.35.1
     out: gen/go
     opt:
       - paths=source_relative
-  - remote: buf.build/grpc/go
+
+  - remote: buf.build/grpc/go:v1.5.1
     out: gen/go
     opt:
       - paths=source_relative
       - require_unimplemented_servers=false
-  - remote: buf.build/protocolbuffers/python
+
+  - remote: buf.build/protocolbuffers/python:v28.3
     out: gen/python
-  - remote: buf.build/grpc/python
+
+  - remote: buf.build/grpc/python:v1.67.1
     out: gen/python

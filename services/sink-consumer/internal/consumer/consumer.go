@@ -7,7 +7,7 @@ import (
 
 	gbav1 "github.com/jordantamm/game-buzz-aggregator/gen/go/gba/v1"
 	gkafka "github.com/jordantamm/game-buzz-aggregator/pkg/kafka"
-	"github.com/jordantamm/game-buzz-aggregator/services/sink-consumer/internal/sink"
+	"github.com/jordantamm/game-buzz-aggregator/pkg/sink"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
@@ -96,7 +96,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 					zap.String("topic", rec.Topic),
 					zap.Error(err),
 				)
-				_ = c.dlqProducer.Produce(ctx, c.dlqTopic, rec.Key, rec.Value)
+				// Never discard a produce error silently: if the DLQ write
+				// also fails, this payload is gone for good and that must be
+				// loud in the logs.
+				if dlqErr := c.dlqProducer.Produce(ctx, c.dlqTopic, rec.Key, rec.Value); dlqErr != nil {
+					c.log.Error("DLQ produce failed; malformed payload is unrecoverable",
+						zap.String("dlq_topic", c.dlqTopic),
+						zap.Error(dlqErr),
+					)
+				}
 				continue
 			}
 			batch = append(batch, &em)

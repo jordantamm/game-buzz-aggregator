@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -17,7 +18,7 @@ import (
 // otlpEndpoint is the OTLP gRPC endpoint (e.g. "otel-collector:4317").
 func Init(ctx context.Context, serviceName, otlpEndpoint string) (func(context.Context) error, error) {
 	exp, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint(otlpEndpoint),
+		otlptracegrpc.WithEndpoint(normalizeEndpoint(otlpEndpoint)),
 		otlptracegrpc.WithInsecure(),
 	)
 	if err != nil {
@@ -42,6 +43,15 @@ func Init(ctx context.Context, serviceName, otlpEndpoint string) (func(context.C
 		propagation.Baggage{},
 	))
 	return tp.Shutdown, nil
+}
+
+// normalizeEndpoint strips a URL scheme and trailing slash from an OTLP endpoint.
+// OTEL_EXPORTER_OTLP_ENDPOINT is conventionally a URL ("http://otel-collector:4317"),
+// but otlptracegrpc.WithEndpoint expects a bare "host:port".
+func normalizeEndpoint(endpoint string) string {
+	endpoint = strings.TrimPrefix(endpoint, "http://")
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+	return strings.TrimSuffix(endpoint, "/")
 }
 
 // Tracer returns a named tracer from the global provider.

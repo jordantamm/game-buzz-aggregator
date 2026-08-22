@@ -1,0 +1,73 @@
+name: LLM Eval Gate
+
+# The disambiguation prompt is the one LLM output that gets written to Postgres.
+# A regression there does not raise an error — it silently misattributes
+# mentions, and every downstream aggregate inherits the corruption. This job is
+# the only thing that catches that class of bug.
+#
+# Scoped to PRs that touch the prompt or its inputs: every run costs real
+# Anthropic tokens, so it does not run on unrelated changes.
+
+on:
+  pull_request:
+    paths:
+      - "services/enricher/src/enricher/activities/resolve.py"
+      - "services/enricher/src/enricher/schemas.py"
+      - "evals/**"
+      - ".github/workflows/eval.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  disambiguation:
+    name: Disambiguation regression suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install promptfoo
+        run: npm install -g promptfoo@0.102.4
+
+      - name: Install Python deps for prompt/assertion helpers
+        # evals/prompt.py imports the production prompt builder from
+        # enricher.activities.resolve, which transitively pulls in the enricher's
+        # client libraries. This is the import closure of that module and nothing
+        # more - deliberately not the full install, which would drag in torch.
+        run: |
+          pip install "pydantic==2.9.2" "pydantic-settings==2.6.1" "structlog==24.4.0" "pyyaml==6.0.2" "temporalio==1.7.1" "asyncpg==0.29.0" "aiokafka==0.11.0" "redis[asyncio]==5.2.0"
+
+      # A suite testing a stale copy of the prompt passes while production
+      # regresses, so drift is a hard failure rather than an auto-fix.
+      - name: Verify system prompt is in sync with resolve.py
+        run: python evals/scripts/sync_system_prompt.py --check
+
+      - name: Validate eval cases parse and are well-formed
+        run: python -c "import sys; sys.path.insert(0,'evals'); import load_cases; print(f'{len(load_cases.generate_tests())} cases')"
+
+      - name: Run promptfoo
+        working-directory: evals
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: promptfoo eval --config promptfooconfig.yaml --no-cache --output results/latest.json
+
+      - name: Enforce thresholds
+        run: python evals/scripts/check_thresholds.py evals/results/latest.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promptfoo-results
+          path: evals/results/
+          retention-days: 30

@@ -26,19 +26,16 @@ func (p *Publisher) Publish(ctx context.Context, key string, msg proto.Message) 
 		return fmt.Errorf("marshal proto: %w", err)
 	}
 
-	p.log.Info("publishing message to redpanda",
-		zap.String("topic", p.topic),
-		zap.String("key", key),
-		zap.Int("bytes", len(b)),
-	)
-
 	if err := p.producer.Produce(ctx, p.topic, []byte(key), b); err != nil {
 		return err
 	}
 
-	p.log.Info("message published successfully",
+	// Debug, not Info: this fires once per mention, and at production ingest
+	// rates an Info line per message drowns out everything worth reading.
+	p.log.Debug("published mention",
 		zap.String("topic", p.topic),
 		zap.String("key", key),
+		zap.Int("bytes", len(b)),
 	)
 	return nil
 }

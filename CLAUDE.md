@@ -4,7 +4,7 @@ This document is the single source of truth for the MVP build. Read it end-to-en
 
 ## Project context
 
-The Game Buzz Aggregator is a streaming data pipeline that ingests game-related discussions from social platforms, enriches them with sentiment and entity-resolution, computes a "Hype Velocity" score, and exposes the results through both a REST API and an MCP server.
+The Game Buzz Aggregator is a streaming data pipeline that ingests game-related discussions from social platforms, enriches them with sentiment and entity-resolution, computes a "Hype Velocity" score, and exposes the results through a REST API, an MCP server, and a LangGraph analyst agent built on top of that MCP server.
 
 **The full vision has many sources (Reddit, Bluesky, Twitch, Metacritic scraping, OpenCritic/Steam APIs). This MVP scope is intentionally narrow: Reddit only.** The architecture must, however, be built such that adding new sources later is a matter of adding a new connector service that publishes to the same Redpanda topic — no changes to enricher, sink, API, or MCP server. Source-agnosticism downstream of the broker is a hard requirement.
 
@@ -20,6 +20,8 @@ The MVP is done when all of the following are true:
 6. The MCP server exposes `search_mentions`, `get_game_buzz`, and `find_similar_games` tools and is reachable from Claude Desktop via stdio.
 7. End-to-end OpenTelemetry traces flow from the connector through to the API response and are viewable in Jaeger.
 8. An integration test using Testcontainers exercises the full path from a fake Reddit response to a row in Postgres.
+9. The enricher's LLM-assisted disambiguation call returns a Pydantic-validated, schema-typed response (never free text) via Instructor, and a promptfoo regression suite runs in CI against a fixed set of labeled ambiguous mentions, gating merges on precision/hallucination thresholds.
+10. The `analyst-agent` service (LangGraph) can take a freeform question (e.g. "what's trending and why"), plan a sequence of MCP tool calls against `mcp-server`, self-correct on empty/low-confidence results, and return a cited, synthesized answer.
 
 Anything beyond this list is out of scope for the MVP.
 
@@ -67,7 +69,17 @@ Anything beyond this list is out of scope for the MVP.
                        ┌─────────────────────────────┐
                        │  api-gateway (Go)           │
                        │  mcp-server (Go)            │
+                       └────────────────┬────────────┘
+                                        │ MCP tools (stdio / Streamable HTTP)
+                                        ▼
+                       ┌─────────────────────────────┐
+                       │  analyst-agent (Python)     │
+                       │  LangGraph tool-calling loop │
                        └─────────────────────────────┘
+
+Eval sidecar (CI, not runtime):
+  - promptfoo regression suite against enricher's LLM disambiguation prompt
+  - Pydantic/Instructor schema validation on every LLM call
 
 Observability sidecar:
   - OpenTelemetry collector
@@ -114,7 +126,11 @@ This is a Go workspace + uv-managed Python monorepo. Use this exact structure:
 │   │   └── src/enricher/
 │   ├── sink-consumer/        ← Go
 │   ├── api-gateway/          ← Go
-│   └── mcp-server/           ← Go
+│   ├── mcp-server/           ← Go
+│   └── analyst-agent/        ← Python (LangGraph)
+│       ├── pyproject.toml
+│       ├── Dockerfile
+│       └── src/analyst_agent/
 │
 ├── pkg/                      ← shared Go packages
 │   ├── kafka/                ← franz-go wrappers, OTel-aware producer/consumer
@@ -141,6 +157,10 @@ This is a Go workspace + uv-managed Python monorepo. Use this exact structure:
 │   ├── runbook.md            ← what to do when X breaks
 │   └── adr/                  ← architecture decision records
 │
+├── evals/
+│   ├── promptfooconfig.yaml  ← disambiguation regression suite, run in CI
+│   └── cases/                ← labeled ambiguous mentions (text + expected game_id or "none")
+│
 └── scripts/
     ├── bootstrap-topics.sh   ← creates Redpanda topics on first boot
     └── seed-games.sh         ← loads games.csv into Postgres
@@ -163,6 +183,8 @@ Pin everything. Floating versions are not acceptable.
 | Jaeger | 1.57+ | all-in-one for local dev |
 | Prometheus | 2.x | |
 | Grafana | 11.x | |
+| promptfoo | 0.10x+ | prompt/LLM regression testing, run via `make eval` and in CI |
+| LangGraph | 0.2x+ | `analyst-agent`'s tool-calling graph |
 
 Go libraries:
 - `github.com/twmb/franz-go` for Kafka/Redpanda
@@ -182,7 +204,15 @@ Python libraries (enricher):
 - `asyncpg` for Postgres
 - `pydantic` v2 for models
 - `anthropic` for LLM disambiguation fallback
+- `instructor` to force the disambiguation call into a Pydantic-typed response (patches the Anthropic client; no free-text parsing)
 - `opentelemetry-*` packages for tracing
+
+Python libraries (analyst-agent):
+- `langgraph` for the tool-calling / self-correction graph
+- `langchain-mcp-adapters` to expose `mcp-server`'s tools as LangGraph-callable tools without hand-writing a client
+- `langchain-anthropic` as the chat model wrapper (`claude-haiku-4-5-20251001` by default; configurable)
+- `pydantic` v2 for the agent's structured final-answer schema
+- `opentelemetry-*` packages for tracing (agent spans correlate with MCP server spans via the same trace propagation contract used elsewhere)
 
 ## Event schema
 
@@ -414,13 +444,15 @@ services/reddit-connector/
 1. Activity `resolve_games(text)`:
    - Run trigram match against in-memory alias table → list of `(game_id, score)` candidates
    - If best score > 0.9 and gap to second-best > 0.2: high-confidence single match, skip LLM
-   - Else if any candidates: call Anthropic with the text + top 5 candidates, ask which game(s) the text refers to (or "none"). Cache the result.
+   - Else if any candidates: call Anthropic with the text + top 5 candidates, ask which game(s) the text refers to (or "none"). The call is wrapped with `instructor` against a `DisambiguationResult` Pydantic model (`matches: list[GameMatch]`, each with `game_id`, `confidence`, `rationale`) — the model is retried automatically on schema-invalid output, so nothing downstream ever parses free text. `game_id` is additionally validated against the candidate set post-hoc to catch hallucinated IDs. Cache the result.
    - Else: return empty list
 2. Activity `compute_sentiment(text)` — local model, batched at the worker level (32 mentions per batch via a small in-process queue)
 3. Activity `generate_embedding(text)` — local model, also batched
 4. Activity `emit_enriched(...)` — produce one event per matched game
 
 All activities are idempotent, decorated with retry policies (3 attempts, exponential backoff with jitter, max 60s interval).
+
+**Eval gate.** The `resolve_games` prompt is the one place a model failure directly corrupts data (wrong game attribution, hallucinated match). It is covered by a promptfoo suite (`evals/promptfooconfig.yaml`) run in CI on every PR that touches `activities/resolve.py` or the prompt template: a fixed set of ~50 labeled ambiguous mentions (`evals/cases/`), asserting (a) exact-match accuracy on `game_id` above a threshold, (b) zero hallucinated `game_id`s outside the candidate set, and (c) `confidence` calibration (mean confidence on wrong answers must stay below mean confidence on right answers). A failing suite blocks merge.
 
 **Layout:**
 ```
@@ -488,7 +520,7 @@ services/enricher/
 
 | Tool name | Description | Parameters |
 |-----------|-------------|------------|
-| `search_mentions` | Hybrid search over mentions (text + filters) | `query: string`, `game_id?: string`, `since?: timestamp`, `limit?: int` |
+| `search_mentions` | Hybrid search over mentions: `pg_trgm` keyword match + pgvector cosine similarity on the query embedding, merged by reciprocal rank fusion | `query: string`, `game_id?: string`, `since?: timestamp`, `limit?: int` |
 | `get_game_buzz` | Mention count + sentiment timeseries for a game | `game_id: string`, `window: "24h"\|"7d"\|"30d"`, `bucket: "hour"\|"day"` |
 | `find_similar_games` | Vector similarity over aggregated game discussion | `game_id: string`, `limit?: int` |
 | `list_trending` | Top games by hype velocity | `window: "24h"\|"7d"`, `limit?: int` |
@@ -498,6 +530,43 @@ services/enricher/
 - Share business logic with `api-gateway` via a `pkg/queries/` package — do not duplicate SQL.
 - Stdio mode is the default; flag-enable HTTP mode for remote use.
 - The MCP server gets its own OTel spans; tool calls produce traces that can be correlated with the API.
+- `search_mentions`' hybrid ranking lives in `pkg/queries/hybrid_search.go`: run the trigram query and the pgvector HNSW query independently (each capped at `limit * 4` candidates), fuse with reciprocal rank fusion (`score = sum(1 / (k + rank))`, `k = 60`), return top `limit`. Keeping the two retrieval passes independent (rather than one SQL query with both predicates) avoids the trigram filter starving vector recall on short/noisy queries.
+
+---
+
+### `analyst-agent` (Python, LangGraph)
+
+**Responsibility:** take a freeform analyst question over chat/CLI/HTTP, plan and execute a sequence of `mcp-server` tool calls, self-correct when a call returns nothing useful, and return a synthesized, cited answer. This is the autonomous-agent layer sitting on top of the MCP infrastructure — distinct from the enricher's Temporal workflow, which is a fixed durable DAG, not a reasoning loop with branching tool choice.
+
+**Inputs:**
+- Config (Pydantic Settings): `mcp_server_url` (Streamable HTTP endpoint), `anthropic_api_key`, `model` (default `claude-haiku-4-5-20251001`), `otel_endpoint`
+- A question, via CLI arg or a thin `POST /ask` HTTP wrapper
+
+**External calls:**
+- `mcp-server` over Streamable HTTP, via `langchain-mcp-adapters` (tools are discovered from the server at startup, not hand-declared — if a tool is added to `mcp-server`, the agent picks it up without a code change)
+- Anthropic API for the planning/reasoning steps
+
+**Graph (LangGraph):**
+1. `plan` node — given the question, decide which tool(s) to call first
+2. `call_tool` node — executes the chosen tool call against the MCP server
+3. `reflect` node — checks the result: empty, low-confidence, or ambiguous → loop back to `plan` with that context (e.g., broaden the time window, drop a filter, try `search_mentions` instead of `get_game_buzz`); otherwise proceed
+4. `synthesize` node — once enough tool results are gathered, produces a final answer as a Pydantic-typed `AnalystAnswer` (`summary: str`, `citations: list[MentionRef]`, `confidence: float`), enforced via `instructor` so the HTTP wrapper never has to parse prose
+5. A hard cap of 6 tool calls per question prevents runaway loops; the agent returns its best partial answer with `confidence` reflecting the shortfall if it hits the cap
+
+**Layout:**
+```
+services/analyst-agent/
+├── pyproject.toml
+├── src/analyst_agent/
+│   ├── __main__.py           ← CLI entrypoint
+│   ├── settings.py           ← Pydantic Settings
+│   ├── graph.py              ← LangGraph StateGraph: plan → call_tool → reflect → synthesize
+│   ├── tools.py              ← MCP tool discovery via langchain-mcp-adapters
+│   ├── schemas.py            ← AnalystAnswer, MentionRef Pydantic models
+│   ├── server.py             ← thin FastAPI POST /ask wrapper
+│   └── telemetry.py          ← OTel setup
+└── Dockerfile
+```
 
 ## Shared concerns
 
@@ -534,6 +603,7 @@ make bootstrap        # create .env from .env.example, pull images
 make up               # docker compose up -d, runs migrations, creates topics, seeds games
 make logs             # tail logs from all services
 make seed-reddit      # produce a synthetic Reddit batch for testing without real API access
+make eval             # run the promptfoo disambiguation suite against evals/cases/
 make down             # stop everything
 ```
 
@@ -555,19 +625,23 @@ Follow this order. Each numbered step is a discrete unit of work that should end
 
 7. **`sink-consumer`.** Skip enrichment for the moment — consume from `mentions.raw` directly and write a minimal row to `mentions` table (no sentiment, no games matched). This proves the persistence path before adding enrichment complexity. Then switch its input topic to `mentions.enriched` once the enricher is built.
 
-8. **`enricher`.** Build the Temporal workflow with stubs first (sentiment returns 0.0, embedding returns zeros, entity resolution does trigram only — no LLM). Then layer in the real models. Then add the LLM fallback.
+8. **`enricher`.** Build the Temporal workflow with stubs first (sentiment returns 0.0, embedding returns zeros, entity resolution does trigram only — no LLM). Then layer in the real models. Then add the LLM fallback, wrapped in `instructor` for typed output from the start — never build the free-text version and retrofit structure later.
 
 9. **Switch `sink-consumer` to `mentions.enriched`.** Update its topic config. Verify enriched data lands in Postgres.
 
 10. **`api-gateway`.** Implement the four endpoints. Manual `curl` test against seeded data.
 
-11. **`mcp-server`.** Implement the four tools. Test locally with the MCP Inspector tool, then add it to Claude Desktop config and chat.
+11. **`mcp-server`.** Implement the four tools, including the hybrid (trigram + vector, RRF-fused) `search_mentions`. Test locally with the MCP Inspector tool, then add it to Claude Desktop config and chat.
 
-12. **Observability polish.** Verify traces are connected end-to-end in Jaeger. Build one Grafana dashboard showing mentions/sec and enrichment latency.
+12. **Eval suite.** Label ~50 real ambiguous mentions (pull real Reddit text where trigram matching was ambiguous). Write `evals/promptfooconfig.yaml` and wire `make eval` into CI, gating on the `resolve_games` prompt.
 
-13. **Integration test.** Write the Testcontainers-based `TestE2E_RedditMentionToPostgres`.
+13. **`analyst-agent`.** Build the LangGraph graph against the already-working `mcp-server`. Start with a single-tool-call path, then add the `reflect` loop and multi-tool planning. Demo: ask it a question that requires chaining `list_trending` → `get_game_buzz` → `search_mentions`.
 
-14. **README + design doc.** Write them last when you actually know what you built. Include a GIF of the Claude Desktop demo.
+14. **Observability polish.** Verify traces are connected end-to-end in Jaeger, including `analyst-agent` spans correlating with the MCP tool-call spans they triggered. Build one Grafana dashboard showing mentions/sec and enrichment latency.
+
+15. **Integration test.** Write the Testcontainers-based `TestE2E_RedditMentionToPostgres`.
+
+16. **README + design doc.** Write them last when you actually know what you built. Include a GIF of the Claude Desktop demo and a transcript of an `analyst-agent` multi-tool-call answer.
 
 ## Out of scope for the MVP
 

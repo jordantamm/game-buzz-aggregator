@@ -243,6 +243,17 @@ services:
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: enricher
+      EMBED_SERVER_PORT: "8000"
+    ports:
+      - "8000:8000"   # /embed - query embeddings for hybrid search
+    healthcheck:
+      # /readyz only passes once the sentence-transformers model is loaded, so
+      # dependents do not start querying an embedder that will 503.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz', timeout=5).status==200 else 1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 180s
     depends_on:
       bootstrap-topics:
         condition: service_completed_successfully
@@ -273,6 +284,7 @@ services:
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: api-gateway
+      EMBEDDER_URL: http://enricher:8000
     ports:
       - "8080:8080"
     depends_on:
@@ -287,11 +299,28 @@ services:
     environment:
       <<: *app-env
       OTEL_SERVICE_NAME: mcp-server
+      EMBEDDER_URL: http://enricher:8000
     ports:
-      - "8082:8081"   # MCP Streamable HTTP transport
+      - "8085:8081"   # MCP HTTP transport (8082 is taken by redpanda pandaproxy)
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  analyst-agent:
+    build:
+      context: .
+      dockerfile: services/analyst-agent/Dockerfile
+    env_file: .env
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: analyst-agent
+      MCP_SERVER_URL: http://mcp-server:8081/sse
+      SERVER_PORT: "8100"
+    ports:
+      - "8100:8100"
+    depends_on:
+      mcp-server:
+        condition: service_started
 
 volumes:
   postgres-data:

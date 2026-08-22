@@ -1,4 +1,14 @@
-import asyncio
+"""In-memory games/alias table used by the entity-resolution activity.
+
+Kept in memory because it is small (hundreds of rows), read on every single
+mention, and changes rarely. It is refreshed from Postgres on an interval by
+`enricher.runtime`, not on a cache miss — an unknown alias is a legitimate
+"no match", not a signal to hit the database.
+"""
+
+from __future__ import annotations
+
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -6,8 +16,6 @@ import asyncpg
 import structlog
 
 log = structlog.get_logger()
-
-REFRESH_INTERVAL = 300  # seconds
 
 
 @dataclass
@@ -17,61 +25,102 @@ class GameEntry:
     aliases: list[str] = field(default_factory=list)
 
 
+# Aliases short enough to collide with ordinary English are only accepted as
+# exact standalone tokens, and never score high enough to skip LLM adjudication.
+AMBIGUOUS_ALIAS_MAX_LEN = 8
+
+
 class GameCache:
-    """In-memory alias → game_id table, refreshed from Postgres every 5 minutes."""
+    """Alias to game_id lookup with a crude token-boundary trigram score."""
 
     def __init__(self, dsn: str):
         self._dsn = dsn
         self._entries: list[GameEntry] = []
-        self._alias_index: dict[str, str] = {}  # alias.lower() → game_id
+        # alias (lowercased) -> game_id
+        self._alias_index: dict[str, str] = {}
+        # alias -> precompiled word-boundary pattern
+        self._alias_patterns: dict[str, re.Pattern[str]] = {}
         self._last_refresh = 0.0
-        self._lock = asyncio.Lock()
 
-    async def _refresh(self, conn: asyncpg.Connection) -> None:
-        rows = await conn.fetch("""
+    async def refresh(self, conn: asyncpg.Connection) -> None:
+        rows = await conn.fetch(
+            """
             SELECT g.id, g.canonical_name, array_agg(ga.alias) AS aliases
             FROM games g
             LEFT JOIN game_aliases ga ON ga.game_id = g.id
             GROUP BY g.id, g.canonical_name
-        """)
-        entries = []
+            """
+        )
+
+        entries: list[GameEntry] = []
         alias_index: dict[str, str] = {}
+        alias_patterns: dict[str, re.Pattern[str]] = {}
+
         for row in rows:
             aliases = [a for a in (row["aliases"] or []) if a]
-            e = GameEntry(game_id=row["id"], canonical_name=row["canonical_name"], aliases=aliases)
-            entries.append(e)
-            alias_index[row["canonical_name"].lower()] = row["id"]
-            for alias in aliases:
-                alias_index[alias.lower()] = row["id"]
+            entries.append(
+                GameEntry(
+                    game_id=row["id"],
+                    canonical_name=row["canonical_name"],
+                    aliases=aliases,
+                )
+            )
+            for name in [row["canonical_name"], *aliases]:
+                key = name.lower().strip()
+                if not key:
+                    continue
+                alias_index[key] = row["id"]
+                alias_patterns[key] = re.compile(
+                    r"(?<!\w)" + re.escape(key) + r"(?!\w)", re.IGNORECASE
+                )
+
         self._entries = entries
         self._alias_index = alias_index
+        self._alias_patterns = alias_patterns
         self._last_refresh = time.monotonic()
-        log.info("game_cache refreshed", count=len(entries))
-
-    async def ensure_fresh(self, conn: asyncpg.Connection) -> None:
-        async with self._lock:
-            if time.monotonic() - self._last_refresh > REFRESH_INTERVAL:
-                await self._refresh(conn)
+        log.info("games cache refreshed", games=len(entries), aliases=len(alias_index))
 
     def lookup(self, text: str) -> list[tuple[str, float]]:
-        """Trigram-style substring scan. Returns (game_id, score) pairs."""
-        text_lower = text.lower()
-        results: list[tuple[str, float]] = []
+        """Return (game_id, score) candidates, best first.
 
-        for alias, game_id in self._alias_index.items():
-            if alias in text_lower:
-                # Score by alias length (longer = more specific = higher confidence)
-                score = min(1.0, len(alias) / 20.0 + 0.5)
-                results.append((game_id, score))
+        Matching is on token boundaries, not raw substrings: a plain
+        `"inside" in text` check fires on "insidergaming", "outside", and
+        "inside the studio", which is how naive alias matching produces its
+        worst false positives.
 
-        # Deduplicate: keep highest score per game_id
-        best: dict[str, float] = {}
-        for game_id, score in results:
-            if score > best.get(game_id, 0.0):
-                best[game_id] = score
+        The score is a heuristic specificity proxy — longer, more distinctive
+        alias strings are less likely to be coincidental. Short aliases are
+        deliberately capped below the high-confidence threshold so they always
+        route to LLM adjudication rather than being trusted outright.
+        """
+        results: dict[str, float] = {}
 
-        return sorted(best.items(), key=lambda x: x[1], reverse=True)
+        for alias, pattern in self._alias_patterns.items():
+            if not pattern.search(text):
+                continue
+
+            game_id = self._alias_index[alias]
+            # Longer aliases are more specific; saturates at 1.0 around 20 chars.
+            score = min(1.0, 0.5 + len(alias) / 20.0)
+            if len(alias) <= AMBIGUOUS_ALIAS_MAX_LEN:
+                # Force short/common aliases through disambiguation.
+                score = min(score, 0.75)
+
+            if score > results.get(game_id, 0.0):
+                results[game_id] = score
+
+        return sorted(results.items(), key=lambda kv: (-kv[1], kv[0]))
 
     def get_candidates(self, game_ids: list[str]) -> list[GameEntry]:
-        id_set = set(game_ids)
-        return [e for e in self._entries if e.game_id in id_set]
+        wanted = set(game_ids)
+        return [e for e in self._entries if e.game_id in wanted]
+
+    def get(self, game_id: str) -> GameEntry | None:
+        for entry in self._entries:
+            if entry.game_id == game_id:
+                return entry
+        return None
+
+    @property
+    def size(self) -> int:
+        return len(self._entries)

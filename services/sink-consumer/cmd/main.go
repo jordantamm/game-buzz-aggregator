@@ -11,9 +11,9 @@ import (
 
 	gkafka "github.com/jordantamm/game-buzz-aggregator/pkg/kafka"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/pg"
+	"github.com/jordantamm/game-buzz-aggregator/pkg/sink"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/telemetry"
 	"github.com/jordantamm/game-buzz-aggregator/services/sink-consumer/internal/consumer"
-	"github.com/jordantamm/game-buzz-aggregator/services/sink-consumer/internal/sink"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )

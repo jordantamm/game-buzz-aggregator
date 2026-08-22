@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.23"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  go:
+    name: Go build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            pkg/go.sum
+            services/*/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l pkg services gen/go tests)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Each module is built separately rather than via `go build ./...` at the
+      # workspace root: the root has no module of its own, so a workspace-wide
+      # pattern does not resolve.
+      - name: Build and test each module
+        run: |
+          set -e
+          for module in pkg services/reddit-connector services/sink-consumer services/api-gateway services/mcp-server; do
+            echo "::group::$module"
+            (cd "$module" && go build ./... && go vet ./... && go test ./...)
+            echo "::endgroup::"
+          done
+
+  python:
+    name: Python lint and test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [enricher, analyst-agent]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install
+        working-directory: services/${{ matrix.service }}
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Make generated protobufs importable
+        if: matrix.service == 'enricher'
+        run: echo "PYTHONPATH=$GITHUB_WORKSPACE/gen/python" >> "$GITHUB_ENV"
+
+      - name: pytest
+        working-directory: services/${{ matrix.service }}
+        run: python -m pytest -q
+
+  integration:
+    name: Integration (Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tests/integration/go.sum
+
+      - name: Run integration tests
+        working-directory: tests/integration
+        # Testcontainers needs a Docker daemon, which ubuntu-latest provides.
+        run: go test -tags=integration -timeout=20m -v ./...

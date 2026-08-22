@@ -12,6 +12,7 @@ import (
 
 	"github.com/jordantamm/game-buzz-aggregator/pkg/kafka"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/telemetry"
+	"github.com/jordantamm/game-buzz-aggregator/services/reddit-connector/internal/archive"
 	"github.com/jordantamm/game-buzz-aggregator/services/reddit-connector/internal/publisher"
 	"github.com/jordantamm/game-buzz-aggregator/services/reddit-connector/internal/ratelimit"
 	"github.com/jordantamm/game-buzz-aggregator/services/reddit-connector/internal/reddit"
@@ -41,6 +42,10 @@ func run() error {
 	viper.SetDefault("TOPIC_MENTIONS_RAW", "mentions.raw")
 	viper.SetDefault("REDIS_ADDR", "localhost:6379")
 	viper.SetDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	viper.SetDefault("MINIO_ENDPOINT", "minio:9000")
+	viper.SetDefault("MINIO_ACCESS_KEY", "minioadmin")
+	viper.SetDefault("MINIO_SECRET_KEY", "minioadmin_dev_password")
+	viper.SetDefault("MINIO_BUCKET", "raw")
 
 	// Logger
 	log, _ := zap.NewProduction()
@@ -79,6 +84,22 @@ func run() error {
 		zap.String("topic", viper.GetString("TOPIC_MENTIONS_RAW")),
 	)
 
+	// Raw-payload archival is best-effort: if MinIO is unreachable the
+	// connector still ingests, it just cannot store replayable raw JSON.
+	var archiver reddit.Archiver
+	arch, err := archive.New(ctx, archive.Config{
+		Endpoint:  viper.GetString("MINIO_ENDPOINT"),
+		AccessKey: viper.GetString("MINIO_ACCESS_KEY"),
+		SecretKey: viper.GetString("MINIO_SECRET_KEY"),
+		Bucket:    viper.GetString("MINIO_BUCKET"),
+	}, log)
+	if err != nil {
+		log.Warn("minio unavailable; raw payloads will not be archived", zap.Error(err))
+	} else {
+		archiver = arch
+		log.Info("minio archiver ready", zap.String("bucket", viper.GetString("MINIO_BUCKET")))
+	}
+
 	pub := publisher.New(prod, viper.GetString("TOPIC_MENTIONS_RAW"), log)
 	cursor := state.New(rdb)
 	bucket := ratelimit.New(rdb)
@@ -103,13 +124,17 @@ func run() error {
 	errCh := make(chan error, len(subreddits))
 	for _, sub := range subreddits {
 		sub := strings.TrimSpace(sub)
-		p := reddit.NewPoller(sub, baseInterval, maxInterval, fetcher, cursor, bucket, pub, log)
+		p := reddit.NewPoller(sub, baseInterval, maxInterval, fetcher, cursor, bucket, pub, archiver, log)
 		go func() {
 			errCh <- p.Run(ctx)
 		}()
 	}
 
-	log.Info("reddit-connector test started", zap.Strings("subreddits", subreddits), zap.Bool("mock", *mock))
+	log.Info("reddit-connector started",
+		zap.Strings("subreddits", subreddits),
+		zap.Bool("mock", *mock),
+		zap.Duration("base_interval", baseInterval),
+	)
 
 	select {
 	case <-ctx.Done():

@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	tokenKey    = "reddit:tokens"
-	maxTokens   = 100
-	refillPer   = time.Minute
+	tokenKey  = "reddit:tokens"
+	maxTokens = 100
+	refillPer = time.Minute
 )
 
 // Bucket is a Redis-backed token bucket for Reddit's 100 req/min quota.

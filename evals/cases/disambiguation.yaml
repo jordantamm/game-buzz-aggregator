@@ -1,0 +1,243 @@
+# Labeled ambiguous-mention cases for the resolve_games disambiguation prompt.
+#
+# Every case here is one where trigram matching alone is NOT sufficient: the
+# alias is a common English word, several games share a substring, or the game
+# is referenced without its canonical name. Cases where trigram matching already
+# wins at high confidence never reach the LLM, so testing them proves nothing.
+#
+# Fields:
+#   text            the Reddit post body
+#   candidates      what the trigram pass would have surfaced (id/name/aliases)
+#   expected        list of game_ids that are correct, or [] for "none of these"
+#   note            why this case is hard (documentation, not asserted)
+#
+# When adding cases, keep the hard-negative ratio high. A suite that is mostly
+# easy positives will pass while the prompt quietly regresses on the collisions
+# that actually corrupt data.
+
+- text: "My controller keeps disconnecting mid-fight, anyone else on PC?"
+  candidates:
+    - id: control
+      name: Control
+      aliases: []
+  expected: []
+  note: "'controller' contains 'control'; hardware complaint, not the game"
+
+- text: "Control is honestly the best thing Remedy has ever made. The Oldest House still gives me chills."
+  candidates:
+    - id: control
+      name: Control
+      aliases: []
+  expected: [control]
+  note: "Common-word title, but 'Remedy' and 'Oldest House' disambiguate it"
+
+- text: "I need to control my spending, I keep buying games I never play"
+  candidates:
+    - id: control
+      name: Control
+      aliases: []
+  expected: []
+  note: "'control' as a verb"
+
+- text: "Just beat Malenia after 60 tries. Hardest boss FromSoft has ever made."
+  candidates:
+    - id: elden-ring
+      name: Elden Ring
+      aliases: [eldenring, er]
+    - id: dark-souls-3
+      name: Dark Souls III
+      aliases: [ds3]
+  expected: [elden-ring]
+  note: "Game never named; identified only by a boss exclusive to it"
+
+- text: "ER runs so much better after the latest patch"
+  candidates:
+    - id: elden-ring
+      name: Elden Ring
+      aliases: [eldenring, er]
+  expected: [elden-ring]
+  note: "Two-letter alias; context is a game patch so the alias is genuine"
+
+- text: "Spent 6 hours in the ER last night, worst birthday ever"
+  candidates:
+    - id: elden-ring
+      name: Elden Ring
+      aliases: [eldenring, er]
+  expected: []
+  note: "Same two-letter alias, emergency room. The hard negative for aliases like this."
+
+- text: "BG3 vs Divinity Original Sin 2 - which should I play first? Both are Larian."
+  candidates:
+    - id: baldurs-gate-3
+      name: Baldur's Gate 3
+      aliases: [bg3, baldurs gate 3]
+    - id: divinity-original-sin-2
+      name: Divinity Original Sin 2
+      aliases: [dos2]
+  expected: [baldurs-gate-3, divinity-original-sin-2]
+  note: "Genuine multi-game post; both must be returned"
+
+- text: "It's basically Dark Souls but with guns and way more forgiving"
+  candidates:
+    - id: dark-souls
+      name: Dark Souls
+      aliases: [ds1]
+    - id: remnant-2
+      name: Remnant II
+      aliases: [remnant 2]
+  expected: [dark-souls]
+  note: "Comparison reference counts as a mention of the compared game"
+
+- text: "Anyone else think Hades 2 early access is already better than Hades 1?"
+  candidates:
+    - id: hades
+      name: Hades
+      aliases: []
+    - id: hades-2
+      name: Hades II
+      aliases: [hades 2]
+  expected: [hades, hades-2]
+  note: "Sequel numbering; substring of the first title is inside the second"
+
+- text: "The Journey to Mordor mod for Skyrim is unreal"
+  candidates:
+    - id: journey
+      name: Journey
+      aliases: []
+    - id: skyrim
+      name: The Elder Scrolls V - Skyrim
+      aliases: [skyrim, tes5]
+  expected: [skyrim]
+  note: "'Journey' is a capitalized common noun inside a mod name, not the game"
+
+- text: "Inside is such an underrated puzzle platformer, that ending though"
+  candidates:
+    - id: inside
+      name: Inside
+      aliases: []
+  expected: [inside]
+  note: "Common-word title, genre context makes it real"
+
+- text: "There's a hidden chest inside the second tower"
+  candidates:
+    - id: inside
+      name: Inside
+      aliases: []
+  expected: []
+  note: "'inside' as a preposition"
+
+- text: "Cyberpunk 2077 finally runs well. 2.0 turned it completely around."
+  candidates:
+    - id: cyberpunk-2077
+      name: Cyberpunk 2077
+      aliases: [cp2077, cyberpunk]
+  expected: [cyberpunk-2077]
+  note: "Straightforward positive control case"
+
+- text: "I love the cyberpunk aesthetic in general, Blade Runner especially"
+  candidates:
+    - id: cyberpunk-2077
+      name: Cyberpunk 2077
+      aliases: [cp2077, cyberpunk]
+  expected: []
+  note: "'cyberpunk' the genre, not the game"
+
+- text: "Prey (2017) is the most underappreciated immersive sim of the decade"
+  candidates:
+    - id: prey
+      name: Prey
+      aliases: []
+  expected: [prey]
+  note: "Common-word title, disambiguated by year and genre"
+
+- text: "Wolves prey on the weak, that's just nature"
+  candidates:
+    - id: prey
+      name: Prey
+      aliases: []
+  expected: []
+  note: "'prey' as a verb"
+
+- text: "Starfield vs No Man's Sky for space exploration? Leaning NMS honestly."
+  candidates:
+    - id: starfield
+      name: Starfield
+      aliases: []
+    - id: no-mans-sky
+      name: No Man's Sky
+      aliases: [nms]
+  expected: [starfield, no-mans-sky]
+  note: "Multi-game comparison, one referenced by initialism"
+
+- text: "The new patch notes dropped and nobody is talking about the stealth nerfs"
+  candidates:
+    - id: elden-ring
+      name: Elden Ring
+      aliases: [eldenring, er]
+  expected: []
+  note: "No game identifiable at all; must not fall back to the only candidate"
+
+- text: "Limbo and Inside are both from Playdead and both are masterpieces"
+  candidates:
+    - id: limbo
+      name: Limbo
+      aliases: []
+    - id: inside
+      name: Inside
+      aliases: []
+  expected: [limbo, inside]
+  note: "Two common-word titles, both genuine, studio name confirms"
+
+- text: "Stuck in limbo waiting for the refund to process"
+  candidates:
+    - id: limbo
+      name: Limbo
+      aliases: []
+  expected: []
+  note: "Idiomatic use of the word"
+
+- text: "Hollow Knight Silksong when? It's been six years."
+  candidates:
+    - id: hollow-knight
+      name: Hollow Knight
+      aliases: [hk]
+    - id: silksong
+      name: Hollow Knight - Silksong
+      aliases: [silksong]
+  expected: [silksong]
+  note: "Sequel title fully contains the first game's name; only the sequel is meant"
+
+- text: "Finally 100%'d Hollow Knight. Path of Pain nearly broke me."
+  candidates:
+    - id: hollow-knight
+      name: Hollow Knight
+      aliases: [hk]
+    - id: silksong
+      name: Hollow Knight - Silksong
+      aliases: [silksong]
+  expected: [hollow-knight]
+  note: "Same substring overlap, opposite correct answer"
+
+- text: "Does anyone have a good build for the witcher 3 death march?"
+  candidates:
+    - id: the-witcher-3
+      name: The Witcher 3 - Wild Hunt
+      aliases: [witcher 3, tw3]
+  expected: [the-witcher-3]
+  note: "Lowercase, difficulty name confirms"
+
+- text: "Watching The Witcher on Netflix, is the game worth playing after?"
+  candidates:
+    - id: the-witcher-3
+      name: The Witcher 3 - Wild Hunt
+      aliases: [witcher 3, tw3]
+  expected: [the-witcher-3]
+  note: "Ambiguous franchise reference that does resolve to the game via 'the game'"
+
+- text: "Factorio has consumed my life. 300 hours and my base is still spaghetti."
+  candidates:
+    - id: factorio
+      name: Factorio
+      aliases: []
+  expected: [factorio]
+  note: "Unambiguous positive control"

@@ -98,3 +98,45 @@ func scanMentions(rows interface {
 	}
 	return results, rows.Err()
 }
+
+// BuzzPoint is one bucket of a game's mention/sentiment timeseries.
+type BuzzPoint struct {
+	Bucket       time.Time `json:"bucket"`
+	MentionCount int       `json:"mention_count"`
+	AvgSentiment *float64  `json:"avg_sentiment"`
+}
+
+// GameTimeseries returns bucketed mention counts and average sentiment for a
+// game, using TimescaleDB's time_bucket. bucket is a Postgres interval literal
+// such as "1 hour" or "1 day".
+//
+// Shared by api-gateway's /v1/games/{id} and mcp-server's get_game_buzz tool so
+// the two surfaces cannot drift apart.
+func GameTimeseries(ctx context.Context, pool *pgxpool.Pool, gameID string, window time.Duration, bucket string) ([]BuzzPoint, error) {
+	since := time.Now().Add(-window)
+	rows, err := pool.Query(ctx, `
+		SELECT
+			time_bucket($1::interval, m.created_at) AS bucket,
+			COUNT(*)                                AS mention_count,
+			AVG(m.sentiment_score)                  AS avg_sentiment
+		FROM mentions m
+		JOIN mention_games mg ON mg.mention_id = m.id
+		WHERE mg.game_id = $2 AND m.created_at >= $3
+		GROUP BY bucket
+		ORDER BY bucket
+	`, bucket, gameID, since)
+	if err != nil {
+		return nil, fmt.Errorf("game timeseries query: %w", err)
+	}
+	defer rows.Close()
+
+	series := []BuzzPoint{}
+	for rows.Next() {
+		var p BuzzPoint
+		if err := rows.Scan(&p.Bucket, &p.MentionCount, &p.AvgSentiment); err != nil {
+			return nil, err
+		}
+		series = append(series, p)
+	}
+	return series, rows.Err()
+}

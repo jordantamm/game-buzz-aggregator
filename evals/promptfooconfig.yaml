@@ -1,0 +1,115 @@
+# promptfoo regression suite for the enricher's entity-disambiguation prompt.
+#
+# Run locally:  make eval
+# Run in CI:    .github/workflows/eval.yml (on any PR touching the prompt,
+#               resolve.py, the schemas, or these cases)
+#
+# What this gates and why:
+#
+# resolve_games is the only LLM call in the pipeline whose output is written to
+# Postgres. A regression here does not raise an error — it silently attributes
+# mentions to the wrong game, and every downstream aggregate (trending,
+# sentiment timeseries, similarity) inherits the corruption. Nothing else in the
+# test suite can catch that, because the output is always well-formed.
+#
+# The suite mirrors production exactly: same system prompt, same user-prompt
+# template, same Anthropic tools-mode schema that `instructor` generates from
+# DisambiguationResult. If this passes and production fails, the two have
+# drifted and that is itself the bug.
+
+description: Entity disambiguation regression suite for enricher.resolve_games
+
+providers:
+  - id: anthropic:messages:claude-haiku-4-5-20251001
+    label: haiku-4.5
+    config:
+      max_tokens: 1024
+      # Deterministic sampling. An eval that fails 1 run in 5 trains people to
+      # re-run CI until it goes green, which defeats the point of a gate.
+      temperature: 0
+      system: file://system_prompt.txt
+      # This mirrors instructor.Mode.ANTHROPIC_TOOLS: the model is forced to
+      # emit a tool call matching the DisambiguationResult schema rather than
+      # prose that something downstream has to parse.
+      tools:
+        - name: report_matches
+          description: Report which candidate games the post is actually discussing.
+          input_schema:
+            type: object
+            properties:
+              matches:
+                type: array
+                description: >-
+                  Games this post is actually discussing. Empty array if the post
+                  is about none of the candidates. Do not guess to avoid an empty answer.
+                items:
+                  type: object
+                  properties:
+                    game_id:
+                      type: string
+                      description: >-
+                        The game_id of a candidate from the supplied list.
+                        Must be copied exactly from that list, never invented.
+                    confidence:
+                      type: number
+                      minimum: 0.0
+                      maximum: 1.0
+                      description: >-
+                        Confidence this post is about this game. Below 0.5 when
+                        the post only mentions it in passing.
+                    rationale:
+                      type: string
+                      description: One sentence citing the wording that identifies this game.
+                  required: [game_id, confidence, rationale]
+            required: [matches]
+      tool_choice:
+        type: tool
+        name: report_matches
+
+prompts:
+  - file://prompt.py:build_prompt
+
+tests: file://load_cases.py:generate_tests
+
+defaultTest:
+  assert:
+    # Every returned game_id must exist in the candidate set that was sent.
+    # This is the hallucination gate: the tool schema guarantees a string, not
+    # a real game. A hallucinated slug is a foreign-key violation in Postgres.
+    - type: python
+      value: file://assertions.py:assert_no_hallucinated_ids
+      weight: 3
+
+    # Exact set match against the label. Partial credit is deliberately not
+    # given: returning an extra game is a false attribution, and missing one is
+    # a lost mention. Both are failures.
+    - type: python
+      value: file://assertions.py:assert_exact_match
+      weight: 2
+
+    - type: python
+      value: file://assertions.py:assert_schema_valid
+      weight: 1
+
+    # Per-case guard against confident wrong answers. The suite-level
+    # calibration property is checked by scripts/check_thresholds.py.
+    - type: python
+      value: file://assertions.py:assert_confidence_calibration
+      weight: 1
+
+outputPath: ./results/latest.json
+
+# The merge gate itself lives in scripts/check_thresholds.py, which reads
+# results/latest.json after the run. It is a separate step rather than a
+# promptfoo threshold because two of the three gates are suite-level properties
+# that no per-case assertion can see:
+#
+#   1. exact-match rate across all cases       >= 0.80
+#   2. hallucinated game_ids                   == 0   (hard zero, never relaxed)
+#   3. mean confidence on wrong answers  <  mean confidence on right answers
+#
+# Gate 1 is set below current measured performance on purpose. A gate pinned at
+# 1.0 fails on ordinary model nondeterminism and gets switched off within a
+# week; a gate slightly below the current score catches real regressions and
+# stays trusted. Raise it as the prompt improves.
+# Gate 2 is absolute: a hallucinated game_id is a foreign-key violation.
