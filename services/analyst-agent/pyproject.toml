@@ -4,12 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "langgraph==0.2.60",
-    "langchain-core==0.3.28",
+    "langchain-core==0.3.36",
     "langchain-anthropic==0.3.1",
     "langchain-mcp-adapters==0.0.3",
-    "mcp==1.1.2",
-    "anthropic==0.40.0",
-    "pydantic==2.9.2",
+    "mcp==1.2.1",
+    "anthropic==0.42.0",
+    "pydantic==2.10.1",
     "pydantic-settings==2.6.1",
     "fastapi==0.115.5",
     "uvicorn[standard]==0.32.1",

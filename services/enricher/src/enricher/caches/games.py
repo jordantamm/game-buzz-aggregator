@@ -124,3 +124,12 @@ class GameCache:
     @property
     def size(self) -> int:
         return len(self._entries)
+
+    @property
+    def alias_count(self) -> int:
+        """How many alias strings are indexed, canonical names included.
+
+        Logged alongside a no-match drop: a suspiciously low count is the
+        signature of a seeding failure rather than genuinely unmatched text.
+        """
+        return len(self._alias_index)

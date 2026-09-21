@@ -1,12 +1,12 @@
 FROM golang:1.23-alpine AS builder
 WORKDIR /build
 
-COPY go.work go.work.sum* ./
+COPY go.work.sum* ./
 COPY gen/go/go.mod gen/go/go.mod
 COPY pkg/go.mod pkg/go.mod
 COPY services/api-gateway/go.mod services/api-gateway/go.mod
 
-RUN go work sync 2>/dev/null || true
+RUN go work init ./gen/go ./pkg ./services/api-gateway
 
 COPY gen/go/ gen/go/
 COPY pkg/ pkg/

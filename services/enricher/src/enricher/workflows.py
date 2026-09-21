@@ -65,18 +65,35 @@ class EnrichMentionWorkflow:
             retry_policy=RETRY,
         )
 
+        # mention_id is passed purely so the activity's log lines can be tied
+        # back to a specific mention; resolution itself only reads the text.
         game_matches = await workflow.execute_activity(
             resolve_games,
-            args=[text],
+            args=[text, mention_id],
             start_to_close_timeout=RESOLVE_TIMEOUT,
             retry_policy=RETRY,
         )
 
         if not game_matches:
+            # workflow.logger, not structlog: it is replay-aware, so a worker
+            # replaying this history after a crash does not re-emit the line.
+            workflow.logger.info(
+                "mention dropped: no game matched",
+                extra={"mention_id": mention_id, "skipped_reason": "no_game_matched"},
+            )
             return EnrichmentOutcome(
                 mention_id=mention_id,
                 skipped_reason="no_game_matched",
             )
+
+        workflow.logger.info(
+            "mention matched; enriching",
+            extra={
+                "mention_id": mention_id,
+                "game_ids": [m["game_id"] for m in game_matches],
+                "methods": [m["method"] for m in game_matches],
+            },
+        )
 
         # Steps 2 and 3 are independent, so they run concurrently. Note these
         # are two separate activity tasks — the previous implementation awaited

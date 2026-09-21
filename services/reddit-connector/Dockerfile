@@ -2,13 +2,13 @@ FROM golang:1.23-alpine AS builder
 WORKDIR /build
 
 # Copy workspace and module files first for layer caching
-COPY go.work go.work.sum* ./
+COPY go.work.sum* ./
 COPY gen/go/go.mod gen/go/go.mod
 COPY pkg/go.mod pkg/go.mod
 COPY services/reddit-connector/go.mod services/reddit-connector/go.mod
 
 # Fake go.sum files so workspace downloads work
-RUN go work sync 2>/dev/null || true
+RUN go work init ./gen/go ./pkg ./services/reddit-connector
 
 # Copy source
 COPY gen/go/ gen/go/

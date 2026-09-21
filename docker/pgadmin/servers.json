@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Game Buzz Aggregator (local)",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "gba",
+      "Username": "gba",
+      "SSLMode": "prefer",
+      "Comment": "Points at the docker-compose `postgres` service. Password is not stored here — enter POSTGRES_PASSWORD from .env on first connect (pgAdmin will offer to save it in the browser session)."
+    }
+  }
+}

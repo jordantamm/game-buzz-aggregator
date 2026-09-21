@@ -1,0 +1,19 @@
+kafka:
+  brokers:
+    - redpanda:9092
+  schemaRegistry:
+    enabled: true
+    urls:
+      - http://redpanda:8081
+  protobuf:
+    enabled: true
+    mappings:
+      - topicName: mentions.raw
+        valueProtoType: gba.v1.Mention
+      - topicName: mentions.enriched
+        valueProtoType: gba.v1.EnrichedMention
+    fileSystem:
+      enabled: true
+      paths:
+        - /etc/console/protos
+      refreshInterval: 5m

@@ -37,6 +37,14 @@ from enricher.workflows import EnrichMentionWorkflow
 
 def _configure_logging() -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
+
+    # structlog writes via print, but Temporal's own loggers (workflow.logger,
+    # activity.logger) go through stdlib logging. Without a root handler those
+    # lines are silently discarded, so workflow-level events never appear.
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s %(message)s")
+    # The SDK's per-poll chatter is not interesting at info; keep its warnings.
+    logging.getLogger("temporalio.client").setLevel(logging.WARNING)
+
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -51,6 +59,20 @@ def _configure_logging() -> None:
     )
 
 
+def _import_model_libraries() -> None:
+    """Import both ML libraries on one thread before warming up on two.
+
+    `sentence_transformers` runs `from transformers import is_torch_npu_available`
+    at import time. Warming both models concurrently races that: one thread finds
+    `transformers` already in sys.modules but still half-executed by the other,
+    and the attribute is not bound yet. Importing serially here makes the
+    concurrent warm-up below a pure model-load, which is the part worth
+    parallelising anyway.
+    """
+    import sentence_transformers  # noqa: F401
+    import transformers  # noqa: F401
+
+
 log = structlog.get_logger()
 
 
@@ -61,6 +83,7 @@ async def main() -> None:
     # Load both models before accepting any work. Otherwise the first mention
     # pays the download/load cost inside an activity timeout and looks flaky.
     log.info("warming up models")
+    await asyncio.to_thread(_import_model_libraries)
     await asyncio.gather(
         asyncio.to_thread(warm_up_sentiment),
         asyncio.to_thread(warm_up_embeddings),
