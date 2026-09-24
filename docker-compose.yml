@@ -316,6 +316,10 @@ services:
       <<: *app-env
       OTEL_SERVICE_NAME: mcp-server
       EMBEDDER_URL: http://enricher:8000
+      # Must match how other containers dial this service. Origin has to agree
+      # with the SSE endpoint clients connect to, or the client's origin check
+      # rejects the connection ("Endpoint origin does not match connection origin").
+      MCP_SERVER_BASE_URL: http://mcp-server:8081
     ports:
       - "8085:8081"   # MCP HTTP transport (8082 is taken by redpanda pandaproxy)
     depends_on:

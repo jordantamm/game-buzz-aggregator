@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/jordantamm/game-buzz-aggregator/pkg/pg"
 	"github.com/jordantamm/game-buzz-aggregator/pkg/telemetry"
 	"github.com/jordantamm/game-buzz-aggregator/services/mcp-server/internal/tools"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -32,6 +34,11 @@ func run() error {
 	viper.AutomaticEnv()
 	viper.SetDefault("POSTGRES_DSN", "postgres://gba:gba_dev_password@localhost:5432/gba?sslmode=disable")
 	viper.SetDefault("MCP_SERVER_HTTP_PORT", "8081")
+	// Must match the host:port clients actually dial, not where the process
+	// happens to run: the SSE client rejects a message-endpoint URL whose
+	// origin differs from the URL it connected to. Inside docker-compose
+	// that's the service name ("mcp-server"), not "localhost".
+	viper.SetDefault("MCP_SERVER_BASE_URL", "http://localhost:8081")
 	viper.SetDefault("EMBEDDER_URL", "http://enricher:8000")
 	viper.SetDefault("EMBEDDER_TIMEOUT_MS", 5000)
 	viper.SetDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
@@ -59,10 +66,44 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Log every tool call the server receives: the caller (analyst-agent, MCP
+	// Inspector, Claude Desktop, ...), exact arguments, and either the result
+	// payload or the error. This is the only place all three call sites funnel
+	// through, so it is the one place to log to be sure nothing is missed.
+	hooks := &server.Hooks{}
+	hooks.AddBeforeCallTool(func(id any, msg *mcp.CallToolRequest) {
+		args, _ := json.Marshal(msg.Params.Arguments)
+		log.Info("tool call received",
+			zap.Any("request_id", id),
+			zap.String("tool", msg.Params.Name),
+			zap.String("arguments", string(args)),
+		)
+	})
+	hooks.AddOnSuccess(func(id any, method mcp.MCPMethod, msg any, result any) {
+		if method != mcp.MethodToolsCall {
+			return
+		}
+		res, _ := json.Marshal(result)
+		log.Info("tool call succeeded",
+			zap.Any("request_id", id),
+			zap.String("result", truncate(string(res), 2000)),
+		)
+	})
+	hooks.AddOnError(func(id any, method mcp.MCPMethod, msg any, err error) {
+		if method != mcp.MethodToolsCall {
+			return
+		}
+		log.Error("tool call failed",
+			zap.Any("request_id", id),
+			zap.Error(err),
+		)
+	})
+
 	mcpServer := server.NewMCPServer(
 		"game-buzz-aggregator",
 		"0.1.0",
 		server.WithToolCapabilities(true),
+		server.WithHooks(hooks),
 	)
 
 	// The embedder is optional: if it is unreachable, search_mentions degrades
@@ -76,8 +117,9 @@ func run() error {
 
 	if *httpMode {
 		addr := ":" + viper.GetString("MCP_SERVER_HTTP_PORT")
-		log.Info("mcp-server SSE HTTP mode", zap.String("addr", addr))
-		sse := server.NewSSEServer(mcpServer, server.WithBaseURL("http://localhost"+addr))
+		baseURL := viper.GetString("MCP_SERVER_BASE_URL")
+		log.Info("mcp-server SSE HTTP mode", zap.String("addr", addr), zap.String("base_url", baseURL))
+		sse := server.NewSSEServer(mcpServer, server.WithBaseURL(baseURL))
 		go func() {
 			<-ctx.Done()
 			shutCtx, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
@@ -89,4 +131,11 @@ func run() error {
 
 	log.Info("mcp-server stdio mode")
 	return server.ServeStdio(mcpServer)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(truncated)"
 }

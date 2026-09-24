@@ -36,8 +36,8 @@ func run() error {
 	// Config
 	viper.AutomaticEnv()
 	viper.SetDefault("REDDIT_SUBREDDITS", "games,gaming,patientgamers,pcgaming,IndieGaming")
-	viper.SetDefault("REDDIT_POLL_INTERVAL_SECONDS", 30)
-	viper.SetDefault("REDDIT_POLL_MAX_INTERVAL_SECONDS", 300)
+	viper.SetDefault("REDDIT_POLL_INTERVAL_SECONDS", 120)
+	viper.SetDefault("REDDIT_POLL_MAX_INTERVAL_SECONDS", 600)
 	viper.SetDefault("REDPANDA_BROKERS", "localhost:19092")
 	viper.SetDefault("TOPIC_MENTIONS_RAW", "mentions.raw")
 	viper.SetDefault("REDIS_ADDR", "localhost:6379")

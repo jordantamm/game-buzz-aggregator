@@ -13,6 +13,7 @@ dependencies = [
     "sentence-transformers==3.3.0",
     "transformers==4.46.3",
     "torch==2.5.1",
+    "numpy==2.5.3",
     "anthropic==0.40.0",
     "instructor==1.7.0",
     "fastapi==0.115.5",

@@ -8,6 +8,8 @@ mention, and changes rarely. It is refreshed from Postgres on an interval by
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -23,6 +25,18 @@ class GameEntry:
     game_id: str
     canonical_name: str
     aliases: list[str] = field(default_factory=list)
+    # Free-text blurb (genre, setting, franchise) from games.metadata->>'description'.
+    # The richer this is, the better the vector index separates similar titles.
+    description: str = ""
+
+    def profile(self) -> str:
+        """Text that represents this game in embedding space."""
+        parts = [self.canonical_name]
+        if self.aliases:
+            parts.append("also known as " + ", ".join(self.aliases[:6]))
+        if self.description:
+            parts.append(self.description)
+        return ". ".join(parts)
 
 
 # Aliases short enough to collide with ordinary English are only accepted as
@@ -41,14 +55,18 @@ class GameCache:
         # alias -> precompiled word-boundary pattern
         self._alias_patterns: dict[str, re.Pattern[str]] = {}
         self._last_refresh = 0.0
+        # Vector index: row i of _vectors is the embedding of _entries[i].profile().
+        self._vectors = None  # numpy (n, dims) float32, L2-normalized
+        self._vector_ids: list[str] = []
+        self._profile_vectors: dict[str, object] = {}  # profile text -> vector
 
     async def refresh(self, conn: asyncpg.Connection) -> None:
         rows = await conn.fetch(
             """
-            SELECT g.id, g.canonical_name, array_agg(ga.alias) AS aliases
+            SELECT g.id, g.canonical_name, g.metadata, array_agg(ga.alias) AS aliases
             FROM games g
             LEFT JOIN game_aliases ga ON ga.game_id = g.id
-            GROUP BY g.id, g.canonical_name
+            GROUP BY g.id, g.canonical_name, g.metadata
             """
         )
 
@@ -58,11 +76,15 @@ class GameCache:
 
         for row in rows:
             aliases = [a for a in (row["aliases"] or []) if a]
+            metadata = row["metadata"] or {}
+            if isinstance(metadata, str):  # asyncpg returns JSONB as str by default
+                metadata = json.loads(metadata)
             entries.append(
                 GameEntry(
                     game_id=row["id"],
                     canonical_name=row["canonical_name"],
                     aliases=aliases,
+                    description=str(metadata.get("description", "")),
                 )
             )
             for name in [row["canonical_name"], *aliases]:
@@ -79,6 +101,45 @@ class GameCache:
         self._alias_patterns = alias_patterns
         self._last_refresh = time.monotonic()
         log.info("games cache refreshed", games=len(entries), aliases=len(alias_index))
+
+    async def build_vector_index(self) -> None:
+        """Embed every game profile. Only profiles not seen before are encoded,
+        so the periodic refresh is nearly free when nothing changed."""
+        import numpy as np
+
+        from enricher.activities.embeddings import encode_texts
+
+        entries = self._entries
+        profiles = [e.profile() for e in entries]
+        missing = [p for p in dict.fromkeys(profiles) if p not in self._profile_vectors]
+        if missing:
+            encoded = await asyncio.to_thread(encode_texts, missing)
+            for text, vec in zip(missing, encoded):
+                self._profile_vectors[text] = vec
+        live = set(profiles)
+        self._profile_vectors = {k: v for k, v in self._profile_vectors.items() if k in live}
+
+        self._vector_ids = [e.game_id for e in entries]
+        self._vectors = (
+            np.stack([self._profile_vectors[p] for p in profiles]) if profiles else None
+        )
+        log.info("game vector index built", games=len(entries), newly_encoded=len(missing))
+
+    def vector_lookup(
+        self, query_vec, top_k: int, min_sim: float
+    ) -> list[tuple[str, float]]:
+        """Nearest games to a normalized query vector, by cosine similarity."""
+        if self._vectors is None or not len(self._vector_ids):
+            return []
+        sims = self._vectors @ query_vec  # both L2-normalized -> cosine
+        order = sims.argsort()[::-1][:top_k]
+        return [
+            (self._vector_ids[i], float(sims[i])) for i in order if sims[i] >= min_sim
+        ]
+
+    @property
+    def has_vector_index(self) -> bool:
+        return self._vectors is not None
 
     def lookup(self, text: str) -> list[tuple[str, float]]:
         """Return (game_id, score) candidates, best first.

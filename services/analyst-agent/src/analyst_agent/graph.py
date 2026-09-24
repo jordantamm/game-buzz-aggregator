@@ -163,7 +163,18 @@ def build_graph(tools: list[BaseTool]):
                     was_empty = True
                 else:
                     try:
-                        result = await tool.ainvoke(call["args"])
+                        # Pass a copy, not call["args"] itself. LangChain's
+                        # BaseTool.arun() mutates the input dict in place to
+                        # inject run_manager/config (harmless for a Pydantic
+                        # args_schema, which _parse_input copies - but MCP
+                        # tools have a raw JSON-schema dict as args_schema, so
+                        # _parse_input returns the SAME object). call["args"]
+                        # is the literal dict living inside the AIMessage in
+                        # `state["messages"]`; mutating it poisons the
+                        # conversation history with a non-JSON-serializable
+                        # AsyncCallbackManagerForToolRun, which blows up the
+                        # next time this history is sent to the Anthropic API.
+                        result = await tool.ainvoke(dict(call["args"]))
                         content = str(result)
                         was_empty = _looks_empty(content)
                     except Exception as exc:  # noqa: BLE001

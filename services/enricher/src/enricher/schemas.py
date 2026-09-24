@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ── Entity resolution ────────────────────────────────────────────────────────
 
-ResolutionMethod = Literal["exact", "trigram", "llm"]
+ResolutionMethod = Literal["exact", "trigram", "vector", "llm"]
 
 
 class GameMatch(BaseModel):

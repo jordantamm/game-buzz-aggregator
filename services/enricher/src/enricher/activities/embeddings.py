@@ -54,6 +54,21 @@ async def generate_embedding(text: str) -> dict:
     ).model_dump()
 
 
+def encode_texts(texts: list[str]):
+    """Embed many texts at once, returning a normalized float32 (n, DIMS) array.
+
+    Used by entity resolution, which needs vectors as numpy for similarity math
+    rather than the packed bytes the Temporal payload path wants.
+    """
+    model = _load_model()
+    return model.encode(
+        [t[:MAX_CHARS] for t in texts],
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        batch_size=32,
+    ).astype("float32")
+
+
 def _encode(text: str) -> bytes:
     model = _load_model()
     # normalize_embeddings makes cosine distance equivalent to dot product,

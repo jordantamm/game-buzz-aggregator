@@ -22,6 +22,20 @@ log = structlog.get_logger()
 app = FastAPI(title="analyst-agent", version="0.1.0")
 
 
+def _flatten_exceptions(exc: BaseException) -> list[str]:
+    """Recursively unwrap an ExceptionGroup into leaf exception messages.
+
+    ExceptionGroups can nest (a TaskGroup inside a TaskGroup), so this walks
+    all the way down rather than assuming one level.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        leaves: list[str] = []
+        for sub in exc.exceptions:
+            leaves.extend(_flatten_exceptions(sub))
+        return leaves
+    return [f"{type(exc).__name__}: {exc}"]
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
 
@@ -57,8 +71,15 @@ async def ask(req: AskRequest) -> AskResponse:
         async with mcp_tools() as tools:
             answer, trace = await run_agent(req.question, tools)
     except Exception as exc:  # noqa: BLE001
-        log.error("agent run failed", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"agent failed: {exc}") from exc
+        # The MCP SDK's SSE transport runs its read/write loops in an anyio
+        # TaskGroup, so a failure there (or during cleanup while unwinding an
+        # earlier error) surfaces as an ExceptionGroup whose str() is just
+        # "unhandled errors in a TaskGroup (N sub-exceptions)" - the real cause
+        # is nested inside .exceptions and would otherwise be lost. Unwrap it
+        # so the log actually says what broke.
+        detail = "; ".join(_flatten_exceptions(exc))
+        log.error("agent run failed", error=detail)
+        raise HTTPException(status_code=500, detail=f"agent failed: {detail}") from exc
 
     log.info(
         "question answered",

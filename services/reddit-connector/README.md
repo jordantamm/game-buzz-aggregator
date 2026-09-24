@@ -79,7 +79,7 @@ The `Mention` contains: a deterministic ULID for the ID, author as a SHA-256 has
 
 ## Testing in isolation (mock mode)
 
-You do **not** need real Reddit credentials. Pass `--mock` and the service uses `MockClient` instead of the real HTTP client. It returns 3 hardcoded posts about Elden Ring, BG3, and Hades 2 on every poll.
+You do **not** need real Reddit credentials. Pass `--mock` and the service uses `MockClient` instead of the real HTTP client. It returns 32 hardcoded posts on every poll: 10 about Elden Ring, 5 about Baldur's Gate 3, and 1 for each other game in `seed/games.csv`.
 
 ### Minimal infrastructure needed
 
@@ -127,8 +127,8 @@ Open `http://localhost:8090` in a browser. You'll see the `mentions.raw` topic w
 | `REDDIT_CLIENT_SECRET` | — | Required in real mode; unused in mock |
 | `REDDIT_USER_AGENT` | — | Required in real mode; unused in mock |
 | `REDDIT_SUBREDDITS` | `games,gaming,patientgamers,pcgaming,IndieGaming` | Comma-separated |
-| `REDDIT_POLL_INTERVAL_SECONDS` | `30` | Base polling interval |
-| `REDDIT_POLL_MAX_INTERVAL_SECONDS` | `300` | Backoff ceiling |
+| `REDDIT_POLL_INTERVAL_SECONDS` | `120` | Base polling interval |
+| `REDDIT_POLL_MAX_INTERVAL_SECONDS` | `600` | Backoff ceiling |
 | `REDPANDA_BROKERS` | `localhost:9092` | Comma-separated broker list |
 | `TOPIC_MENTIONS_RAW` | `mentions.raw` | Topic to produce to |
 | `REDIS_ADDR` | `localhost:6379` | |

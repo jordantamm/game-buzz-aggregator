@@ -23,6 +23,21 @@ class Settings(BaseSettings):
     redis_addr: str = "localhost:6379"
     games_cache_refresh_seconds: int = 300
 
+    # ── Entity resolution strategy ────────────────────────────────────
+    # alias  : legacy. Alias scan only; the LLM adjudicates alias hits.
+    # vector : embed the post, retrieve nearest games; accept by threshold, no LLM.
+    # hybrid : alias hits + vector neighbours become candidates; the LLM decides.
+    resolution_mode: str = "hybrid"
+    # Cosine similarity (post vs. game profile) needed to become a candidate.
+    # MiniLM similarities between a post and a short profile are low in absolute
+    # terms; calibrate against evals/cases before trusting these numbers.
+    vector_candidate_min_sim: float = 0.30
+    # `vector` mode only: accept the top neighbour above this, if it leads the
+    # runner-up by `vector_accept_gap`.
+    vector_accept_sim: float = 0.50
+    vector_accept_gap: float = 0.08
+    vector_top_k: int = 5
+
     # ── LLM disambiguation ────────────────────────────────────────────
     # Empty api key is a supported configuration: ambiguous mentions resolve to
     # no match rather than the service failing to start.

@@ -42,6 +42,8 @@ class Runtime:
         self.game_cache = GameCache(settings.postgres_dsn)
         async with self._pg_pool.acquire() as conn:
             await self.game_cache.refresh(conn)
+        if settings.resolution_mode in ("vector", "hybrid"):
+            await self.game_cache.build_vector_index()
 
         self.disambiguation_cache = DisambiguationCache(f"redis://{settings.redis_addr}")
 
@@ -77,6 +79,8 @@ class Runtime:
                 assert self._pg_pool is not None and self.game_cache is not None
                 async with self._pg_pool.acquire() as conn:
                     await self.game_cache.refresh(conn)
+                if settings.resolution_mode in ("vector", "hybrid"):
+                    await self.game_cache.build_vector_index()
             except Exception as exc:  # noqa: BLE001 - loop must survive any failure
                 log.warning("games cache refresh failed", error=str(exc))
 

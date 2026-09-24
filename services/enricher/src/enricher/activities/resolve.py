@@ -22,6 +22,8 @@ test in evals/promptfooconfig.yaml — keep the two in sync when editing.
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from temporalio import activity
 
@@ -43,8 +45,9 @@ MAX_CANDIDATES = 5
 
 SYSTEM_PROMPT = """You are an entity resolver for video game discussions on Reddit.
 
-You are given a post and a list of candidate games whose names or aliases appear
-somewhere in the post's text. Your job is to decide which candidates, if any, the
+You are given a post and a list of candidate games. Candidates were found by name
+match or by semantic similarity, so a candidate's name may not appear in the post
+at all, and some candidates will be wrong. Your job is to decide which candidates, if any, the
 post is ACTUALLY DISCUSSING.
 
 Rules:
@@ -108,57 +111,55 @@ async def resolve_games(text: str, mention_id: str = "") -> list[dict]:
 
     bound = log.bind(mention_id=mention_id, text_preview=_preview(text))
 
-    candidates = rt.game_cache.lookup(text)
+    mode = settings.resolution_mode
+    alias_hits = [] if mode == "vector" else rt.game_cache.lookup(text)
 
-    # Stage one found nothing. The LLM is never consulted here: it only ever
-    # chooses *among* candidates, so no candidates means no question to ask.
+    # Fast path: one strong alias hit, clearly ahead of anything else. Skips both
+    # the embedding and the LLM.
+    if alias_hits:
+        best_id, best_score = alias_hits[0]
+        runner_up = alias_hits[1][1] if len(alias_hits) > 1 else 0.0
+        gap = best_score - runner_up
+        if best_score >= HIGH_CONFIDENCE_SCORE and gap > HIGH_CONFIDENCE_GAP:
+            bound.info(
+                "mention matched",
+                game_id=best_id,
+                confidence=round(best_score, 3),
+                method="trigram",
+                stage="alias_scan",
+                runner_up_score=round(runner_up, 3),
+                gap=round(gap, 3),
+            )
+            return [GameMatch(game_id=best_id, confidence=best_score, method="trigram").model_dump()]
+
+    # Semantic retrieval: finds games the post is about even when no alias
+    # appears in it ("that FromSoft game with the tarnished").
+    vector_hits: list[tuple[str, float]] = []
+    if mode in ("vector", "hybrid") and rt.game_cache.has_vector_index:
+        vector_hits = await _vector_neighbours(text, rt.game_cache)
+
+    if mode == "vector":
+        return _accept_vector(vector_hits, bound)
+
+    candidates = _merge_candidates(alias_hits, vector_hits)
     if not candidates:
         bound.info(
             "mention dropped",
-            reason="no_alias_match",
-            stage="alias_scan",
+            reason="no_candidates",
+            stage="alias_scan+vector",
             candidate_count=0,
             games_in_cache=rt.game_cache.size,
             aliases_in_cache=rt.game_cache.alias_count,
+            vector_index=rt.game_cache.has_vector_index,
         )
         return []
 
-    best_id, best_score = candidates[0]
-    runner_up = candidates[1][1] if len(candidates) > 1 else 0.0
-    gap = best_score - runner_up
-    scored = [{"game_id": g, "score": round(s, 3)} for g, s in candidates[:MAX_CANDIDATES]]
-
-    # Unambiguous: one strong match, clearly ahead of anything else.
-    if best_score >= HIGH_CONFIDENCE_SCORE and gap > HIGH_CONFIDENCE_GAP:
-        bound.info(
-            "mention matched",
-            game_id=best_id,
-            confidence=round(best_score, 3),
-            method="trigram",
-            stage="alias_scan",
-            runner_up_score=round(runner_up, 3),
-            gap=round(gap, 3),
-            candidates=scored,
-        )
-        return [GameMatch(game_id=best_id, confidence=best_score, method="trigram").model_dump()]
-
-    # Ambiguous. Record which of the two thresholds sent this to adjudication —
-    # "score too low" and "runner-up too close" are different tuning problems.
-    ambiguity = (
-        "best_score_below_threshold"
-        if best_score < HIGH_CONFIDENCE_SCORE
-        else "gap_to_runner_up_too_small"
-    )
-    top_ids = [game_id for game_id, _ in candidates[:MAX_CANDIDATES]]
+    top_ids = [game_id for game_id, _ in candidates]
+    scored = [{"game_id": g, "score": round(sc, 3)} for g, sc in candidates]
     bound.info(
-        "ambiguous alias match; routing to llm adjudication",
-        stage="alias_scan",
-        ambiguity=ambiguity,
-        best_game_id=best_id,
-        best_score=round(best_score, 3),
-        score_threshold=HIGH_CONFIDENCE_SCORE,
-        gap=round(gap, 3),
-        required_gap=HIGH_CONFIDENCE_GAP,
+        "ambiguous or alias-less mention; routing to llm adjudication",
+        alias_hits=[g for g, _ in alias_hits[:MAX_CANDIDATES]],
+        vector_hits=[{"game_id": g, "sim": round(sc, 3)} for g, sc in vector_hits],
         candidates=scored,
     )
 
@@ -199,6 +200,54 @@ async def resolve_games(text: str, mention_id: str = "") -> list[dict]:
 
     await rt.disambiguation_cache.set(text, top_ids, payload)
     return payload
+
+
+async def _vector_neighbours(text: str, cache) -> list[tuple[str, float]]:
+    from enricher.activities.embeddings import encode_texts
+
+    query = (await asyncio.to_thread(encode_texts, [text]))[0]
+    return cache.vector_lookup(
+        query, settings.vector_top_k, settings.vector_candidate_min_sim
+    )
+
+
+def _merge_candidates(
+    alias_hits: list[tuple[str, float]], vector_hits: list[tuple[str, float]]
+) -> list[tuple[str, float]]:
+    """Union of both retrievers, capped at MAX_CANDIDATES.
+
+    Alias hits go first: they are literal evidence in the text. Vector-only
+    neighbours fill the remaining slots by similarity. Scores from the two
+    retrievers are on different scales, so they are ranked by source, not mixed.
+    """
+    merged: dict[str, float] = {}
+    for game_id, score in alias_hits:
+        merged[game_id] = score
+    for game_id, sim in vector_hits:
+        merged.setdefault(game_id, sim)
+    return list(merged.items())[:MAX_CANDIDATES]
+
+
+def _accept_vector(hits: list[tuple[str, float]], bound) -> list[dict]:
+    """Vector-only mode: no LLM, accept the top neighbour if it clears both bars."""
+    if not hits:
+        bound.info("mention dropped", reason="no_vector_neighbour", stage="vector")
+        return []
+    top_id, top_sim = hits[0]
+    runner_up = hits[1][1] if len(hits) > 1 else 0.0
+    if top_sim < settings.vector_accept_sim or top_sim - runner_up < settings.vector_accept_gap:
+        bound.info(
+            "mention dropped",
+            reason="vector_below_threshold",
+            stage="vector",
+            top=top_id,
+            sim=round(top_sim, 3),
+            gap=round(top_sim - runner_up, 3),
+        )
+        return []
+    bound.info("mention matched", game_id=top_id, confidence=round(top_sim, 3),
+               method="vector", stage="vector")
+    return [GameMatch(game_id=top_id, confidence=min(1.0, top_sim), method="vector").model_dump()]
 
 
 async def _llm_disambiguate(
